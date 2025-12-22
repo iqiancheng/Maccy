@@ -5,7 +5,7 @@
 "Text" = "Text";
 "SaveDescription" = "Change what types of copied content should be stored.";
 "Size" = "Size:";
-"SizeTooltip" = "Number of history items to keep.\nDefault: 200.";
+"SizeTooltip" = "Maximum number of history items to keep (up to 1,000,000).\nDefault: 999.\nText items can be unlimited when searching, but images/files are limited by this setting.";
 "CurrentSizeTooltip" = "Current size on disk.";
 "SortBy" = "Sort by:";
 "LastCopiedAt" = "Time of last copy";

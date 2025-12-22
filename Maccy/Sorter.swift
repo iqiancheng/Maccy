@@ -47,6 +47,17 @@ class Sorter {
       return (lhs.pin != nil) && (rhs.pin == nil)
     }
   }
+  
+  // Compare function for sorting decorators
+  func compare(_ lhs: HistoryItem, _ rhs: HistoryItem) -> Bool {
+    if byPinned(lhs, rhs) {
+      return true
+    }
+    if byPinned(rhs, lhs) {
+      return false
+    }
+    return bySortingAlgorithm(lhs, rhs, Defaults[.sortBy])
+  }
 }
 // swiftlint:enable identifier_name
 // swiftlint:enable type_name

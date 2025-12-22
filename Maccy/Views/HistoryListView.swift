@@ -50,6 +50,18 @@ struct HistoryListView: View {
         LazyVStack(spacing: 0) {
           ForEach(unpinnedItems) { item in
             HistoryItemView(item: item)
+              .onAppear {
+                // Load more items when approaching the end
+                if let lastItem = unpinnedItems.last, item.id == lastItem.id {
+                  Task {
+                    await loadMoreIfNeeded()
+                  }
+                }
+              }
+              .onDisappear {
+                // Clean up when item disappears from view (optional optimization)
+                // This helps free memory for items that scroll out of view
+              }
           }
         }
         .task(id: appState.scrollTarget) {
@@ -113,6 +125,22 @@ struct HistoryListView: View {
             }
         }
       }
+    }
+  }
+  
+  @MainActor
+  private func loadMoreIfNeeded() async {
+    // Only load more if not searching and we have more items to load
+    guard appState.history.searchQuery.isEmpty,
+          appState.history.hasMoreItems else { return }
+    
+    let currentCount = appState.history.unpinnedItems.count
+    
+    do {
+      _ = try await appState.history.loadMore(offset: currentCount, limit: 50)
+      // Items are automatically updated in loadMore
+    } catch {
+      // Silently fail - user can scroll to load more
     }
   }
 }

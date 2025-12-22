@@ -121,6 +121,8 @@ class HistoryItemDecorator: Identifiable, Hashable {
     previewImage?.recache()
     thumbnailImage = nil
     previewImage = nil
+    // Untrack thumbnail when cleaned up
+    History.shared.untrackThumbnail(for: id)
   }
 
   @MainActor
@@ -129,6 +131,8 @@ class HistoryItemDecorator: Identifiable, Hashable {
       return
     }
     thumbnailImage = image.resized(to: HistoryItemDecorator.thumbnailImageSize)
+    // Track thumbnail generation for limiting
+    History.shared.trackThumbnailGenerated(for: id)
   }
 
   @MainActor

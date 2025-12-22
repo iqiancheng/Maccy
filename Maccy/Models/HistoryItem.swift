@@ -144,6 +144,16 @@ class HistoryItem {
   }
 
   var imageData: Data? {
+    // First try to load from external file path
+    if let imageContent = contents.first(where: { content in
+      let type = NSPasteboard.PasteboardType(content.type)
+      return [.tiff, .png, .jpeg, .heic].contains(type) && content.filePath != nil
+    }), let filePath = imageContent.filePath {
+      let url = URL(fileURLWithPath: filePath)
+      return try? Data(contentsOf: url)
+    }
+    
+    // Fallback to database storage
     var data: Data?
     data = contentData([.tiff, .png, .jpeg, .heic])
     if data == nil, universalClipboardImage, let url = fileURLs.first {

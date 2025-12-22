@@ -83,7 +83,17 @@ class Clipboard {
 
     for content in contents {
       guard content.type != NSPasteboard.PasteboardType.fileURL.rawValue else { continue }
-      pasteboard.setData(content.value, forType: NSPasteboard.PasteboardType(content.type))
+      
+      // Load data from file path if available, otherwise use stored value
+      var data = content.value
+      if data == nil, let filePath = content.filePath {
+        let url = URL(fileURLWithPath: filePath)
+        data = try? Data(contentsOf: url)
+      }
+      
+      if let data = data {
+        pasteboard.setData(data, forType: NSPasteboard.PasteboardType(content.type))
+      }
     }
 
     // Use writeObjects for file URLs so that multiple files that are copied actually work.
@@ -202,7 +212,31 @@ class Clipboard {
       }
 
       types.forEach { type in
-        contents.append(HistoryItemContent(type: type.rawValue, value: item.data(forType: type)))
+        let data = item.data(forType: type)
+        
+        // For images and files, save to external storage and store path only
+        if type == .png || type == .tiff || type == .jpeg || type == .heic {
+          if let imageData = data {
+            let ext = type == .png ? "png" : type == .tiff ? "tiff" : type == .jpeg ? "jpeg" : "heic"
+            let fileURL = Storage.shared.generateCacheFilePath(for: type.rawValue, extension: ext)
+            if (try? imageData.write(to: fileURL, options: [.atomic])) != nil {
+              contents.append(HistoryItemContent(type: type.rawValue, value: nil, filePath: fileURL.path))
+            } else {
+              // Fallback to storing in database if file write fails
+              contents.append(HistoryItemContent(type: type.rawValue, value: imageData))
+            }
+          }
+        } else if type == .fileURL, let fileData = data {
+          // For file URLs, we already have the path, just store it
+          if let url = URL(dataRepresentation: fileData, relativeTo: nil, isAbsolute: true) {
+            contents.append(HistoryItemContent(type: type.rawValue, value: fileData, filePath: url.path))
+          } else {
+            contents.append(HistoryItemContent(type: type.rawValue, value: fileData))
+          }
+        } else {
+          // For text and other types, store in database as before
+          contents.append(HistoryItemContent(type: type.rawValue, value: data))
+        }
       }
     })
 

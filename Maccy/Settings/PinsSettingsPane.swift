@@ -127,6 +127,8 @@ struct PinsSettingsPane: View {
         TableColumn(Text("Key", tableName: "PinsSettings")) { item in
           PinPickerView(item: item, availablePins: availablePins)
             .onChange(of: item.pin) {
+              // Deduplicate pins when changed
+              appState.history.deduplicatePins()
               availablePins = HistoryItem.availablePins
             }
         }
