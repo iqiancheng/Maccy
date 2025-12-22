@@ -682,14 +682,20 @@ class History { // swiftlint:disable:this type_body_length
       return modified
     }
     
-    // Then check database for duplicates (limit search for performance)
+    // Get pure text from the new item
+    let itemText = item.text ?? item.previewableText
+    guard !itemText.isEmpty else {
+      return nil
+    }
+    
+    // Check database for items with the same pure text (ignore app sources)
     var descriptor = FetchDescriptor<HistoryItem>(
       sortBy: [SortDescriptor(\.lastCopiedAt, order: .reverse)]
     )
     descriptor.fetchLimit = 1000 // Limit search to recent items
     
     if let recent = try? Storage.shared.context.fetch(descriptor) {
-      if let duplicate = recent.first(where: { $0 != item && ($0 == item || $0.supersedes(item)) }) {
+      if let duplicate = recent.first(where: { $0 != item && ($0.text ?? $0.previewableText) == itemText }) {
         return duplicate
       }
     }
