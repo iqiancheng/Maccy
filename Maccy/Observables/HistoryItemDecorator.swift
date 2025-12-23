@@ -1,4 +1,5 @@
 import AppKit.NSWorkspace
+import AVFoundation
 import Defaults
 import Foundation
 import Observation
@@ -83,7 +84,8 @@ class HistoryItemDecorator: Identifiable, Hashable {
 
   @MainActor
   func ensureThumbnailImage() {
-    guard item.image != nil else {
+    // Check if we have image data or image/video file path
+    guard item.image != nil || item.hasImageVideoFilePath else {
       return
     }
     guard thumbnailImage == nil else {
@@ -92,14 +94,16 @@ class HistoryItemDecorator: Identifiable, Hashable {
     guard thumbnailImageGenerationTask == nil else {
       return
     }
-    thumbnailImageGenerationTask = Task { [weak self] in
-      self?.generateThumbnailImage()
+    thumbnailImageGenerationTask = Task { @MainActor [weak self] in
+      guard let self = self else { return }
+      await self.generateThumbnailImage()
     }
   }
 
   @MainActor
   func ensurePreviewImage() {
-    guard item.image != nil else {
+    // Check if we have image data or image/video file path
+    guard item.image != nil || item.hasImageVideoFilePath else {
       return
     }
     guard previewImage == nil else {
@@ -108,8 +112,9 @@ class HistoryItemDecorator: Identifiable, Hashable {
     guard previewImageGenerationTask == nil else {
       return
     }
-    previewImageGenerationTask = Task { [weak self] in
-      self?.generatePreviewImage()
+    previewImageGenerationTask = Task { @MainActor [weak self] in
+      guard let self = self else { return }
+      await self.generatePreviewImage()
     }
   }
 
@@ -126,7 +131,46 @@ class HistoryItemDecorator: Identifiable, Hashable {
   }
 
   @MainActor
-  private func generateThumbnailImage() {
+  private func generateThumbnailImage() async {
+    // Check if we have a file path for image/video
+    if let filePath = item.imageVideoFilePath {
+      let url = URL(fileURLWithPath: filePath)
+      
+      // Verify file exists and is readable
+      guard FileManager.default.fileExists(atPath: filePath),
+            FileManager.default.isReadableFile(atPath: filePath) else {
+        // Silently fail for permission issues - this is expected in sandboxed apps
+        return
+      }
+      
+      // For video files, generate thumbnail asynchronously
+      if item.isVideoFile {
+        if let thumbnail = await generateVideoThumbnail(from: url, size: HistoryItemDecorator.thumbnailImageSize) {
+          self.thumbnailImage = thumbnail
+          History.shared.trackThumbnailGenerated(for: self.id)
+        }
+        return
+      }
+      
+      // For image files, load and resize asynchronously
+      do {
+        let imageData = try Data(contentsOf: url)
+        guard let image = NSImage(data: imageData) else {
+          return
+        }
+        self.thumbnailImage = image.resized(to: HistoryItemDecorator.thumbnailImageSize)
+        History.shared.trackThumbnailGenerated(for: self.id)
+      } catch {
+        // Silently fail for permission errors - this is expected in sandboxed apps
+        // Only log unexpected errors (not permission-related)
+        if !error.localizedDescription.contains("permission") && !error.localizedDescription.contains("couldn't be opened") {
+          History.shared.logger.warning("Failed to load image from \(filePath): \(error.localizedDescription)")
+        }
+      }
+      return
+    }
+    
+    // Fallback to synchronous loading for cached images
     guard let image = item.image else {
       return
     }
@@ -136,17 +180,87 @@ class HistoryItemDecorator: Identifiable, Hashable {
   }
 
   @MainActor
-  private func generatePreviewImage() {
+  private func generatePreviewImage() async {
+    // Check if we have a file path for image/video
+    if let filePath = item.imageVideoFilePath {
+      let url = URL(fileURLWithPath: filePath)
+      
+      // Verify file exists and is readable
+      guard FileManager.default.fileExists(atPath: filePath),
+            FileManager.default.isReadableFile(atPath: filePath) else {
+        // Silently fail for permission issues - this is expected in sandboxed apps
+        return
+      }
+      
+      // For video files, generate thumbnail asynchronously
+      if item.isVideoFile {
+        if let thumbnail = await generateVideoThumbnail(from: url, size: HistoryItemDecorator.previewImageSize) {
+          self.previewImage = thumbnail
+        }
+        return
+      }
+      
+      // For image files, load and resize asynchronously
+      do {
+        let imageData = try Data(contentsOf: url)
+        guard let image = NSImage(data: imageData) else {
+          return
+        }
+        self.previewImage = image.resized(to: HistoryItemDecorator.previewImageSize)
+      } catch {
+        // Silently fail for permission errors - this is expected in sandboxed apps
+        // Only log unexpected errors (not permission-related)
+        if !error.localizedDescription.contains("permission") && !error.localizedDescription.contains("couldn't be opened") {
+          History.shared.logger.warning("Failed to load image from \(filePath): \(error.localizedDescription)")
+        }
+      }
+      return
+    }
+    
+    // Fallback to synchronous loading for cached images
     guard let image = item.image else {
       return
     }
     previewImage = image.resized(to: HistoryItemDecorator.previewImageSize)
   }
+  
+  // Generate thumbnail from video file
+  private func generateVideoThumbnail(from url: URL, size: NSSize) async -> NSImage? {
+    // Check if file is readable before attempting to generate thumbnail
+    guard FileManager.default.isReadableFile(atPath: url.path) else {
+      return nil
+    }
+    
+    return await withCheckedContinuation { continuation in
+      let asset = AVAsset(url: url)
+      let imageGenerator = AVAssetImageGenerator(asset: asset)
+      imageGenerator.appliesPreferredTrackTransform = true
+      imageGenerator.requestedTimeToleranceAfter = .zero
+      imageGenerator.requestedTimeToleranceBefore = .zero
+      
+      // Generate thumbnail at the beginning of the video
+      let time = CMTime(seconds: 0, preferredTimescale: 600)
+      
+      imageGenerator.generateCGImagesAsynchronously(forTimes: [NSValue(time: time)]) { _, cgImage, _, result, error in
+        guard let cgImage = cgImage, error == nil else {
+          continuation.resume(returning: nil)
+          return
+        }
+        
+        let nsImage = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+        let resizedImage = nsImage.resized(to: size)
+        continuation.resume(returning: resizedImage)
+      }
+    }
+  }
 
   @MainActor
   func sizeImages() {
-    generatePreviewImage()
-    generateThumbnailImage()
+    Task { @MainActor [weak self] in
+      guard let self = self else { return }
+      await self.generatePreviewImage()
+      await self.generateThumbnailImage()
+    }
   }
 
   func highlight(_ query: String, _ ranges: [Range<String.Index>]) {

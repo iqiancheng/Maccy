@@ -211,12 +211,43 @@ class Clipboard {
         types = types.subtracting([.microsoftLinkSource, .microsoftObjectLink, .pdf])
       }
 
+      // First pass: collect file URLs to check if images/videos come from files
+      var fileURLs: [URL] = []
+      types.forEach { type in
+        if type == .fileURL, let fileData = item.data(forType: type) {
+          if let url = URL(dataRepresentation: fileData, relativeTo: nil, isAbsolute: true) {
+            fileURLs.append(url)
+          }
+        }
+      }
+      
+      // Check if any file URLs point to image/video files
+      let imageVideoExtensions: Set<String> = ["png", "jpg", "jpeg", "tiff", "tif", "heic", "heif", "gif", "bmp", "webp", "mov", "mp4", "avi", "mkv", "m4v", "mpg", "mpeg"]
+      let hasImageVideoFiles = fileURLs.contains { url in
+        imageVideoExtensions.contains(url.pathExtension.lowercased())
+      }
+      
       types.forEach { type in
         let data = item.data(forType: type)
         
-        // For images and files, save to external storage and store path only
-        if type == .png || type == .tiff || type == .jpeg || type == .heic {
-          if let imageData = data {
+        // For file URLs pointing to image/video files, just record the path (no backup)
+        if type == .fileURL, let fileData = data {
+          if let url = URL(dataRepresentation: fileData, relativeTo: nil, isAbsolute: true) {
+            let ext = url.pathExtension.lowercased()
+            if imageVideoExtensions.contains(ext) {
+              // For image/video files, record the original file path without backing up
+              contents.append(HistoryItemContent(type: type.rawValue, value: nil, filePath: url.path))
+            } else {
+              // For other files, store as before
+              contents.append(HistoryItemContent(type: type.rawValue, value: fileData, filePath: url.path))
+            }
+          } else {
+            contents.append(HistoryItemContent(type: type.rawValue, value: fileData))
+          }
+        } else if type == .png || type == .tiff || type == .jpeg || type == .heic {
+          // For image data from clipboard (not files), only cache if not already handled as file
+          // If we have image/video files, skip caching clipboard image data
+          if !hasImageVideoFiles, let imageData = data {
             let ext = type == .png ? "png" : type == .tiff ? "tiff" : type == .jpeg ? "jpeg" : "heic"
             let fileURL = Storage.shared.generateCacheFilePath(for: type.rawValue, extension: ext)
             if (try? imageData.write(to: fileURL, options: [.atomic])) != nil {
@@ -225,13 +256,12 @@ class Clipboard {
               // Fallback to storing in database if file write fails
               contents.append(HistoryItemContent(type: type.rawValue, value: imageData))
             }
-          }
-        } else if type == .fileURL, let fileData = data {
-          // For file URLs, we already have the path, just store it
-          if let url = URL(dataRepresentation: fileData, relativeTo: nil, isAbsolute: true) {
-            contents.append(HistoryItemContent(type: type.rawValue, value: fileData, filePath: url.path))
-          } else {
-            contents.append(HistoryItemContent(type: type.rawValue, value: fileData))
+          } else if hasImageVideoFiles {
+            // If we have file URLs for images/videos, skip clipboard image data
+            // (the file URL already contains the image/video)
+          } else if let imageData = data {
+            // Fallback: store in database if no file and caching failed
+            contents.append(HistoryItemContent(type: type.rawValue, value: imageData))
           }
         } else {
           // For text and other types, store in database as before

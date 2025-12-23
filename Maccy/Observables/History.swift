@@ -1,5 +1,6 @@
 // swiftlint:disable file_length
 import AppKit.NSRunningApplication
+import CryptoKit
 import Defaults
 import Foundation
 import Logging
@@ -496,6 +497,13 @@ class History { // swiftlint:disable:this type_body_length
     
     // Limit image thumbnails if needed (asynchronously)
     limitImageThumbnailsIfNeeded()
+    
+    // Notify that storage size may have changed (async to avoid blocking)
+    Task {
+      // Small delay to ensure file writes are complete
+      try? await Task.sleep(nanoseconds: 500_000_000) // 0.5 seconds
+      NotificationCenter.default.post(name: Storage.storageSizeDidChangeNotification, object: nil)
+    }
 
     return itemDecorator
   }
@@ -541,6 +549,15 @@ class History { // swiftlint:disable:this type_body_length
       Storage.shared.context.processPendingChanges()
       try? Storage.shared.context.save()
       
+      // Clean up orphaned cache files (files not referenced by any remaining items)
+      cleanupOrphanedCacheFiles()
+      
+      // Vacuum database to reclaim space
+      Storage.shared.vacuumDatabase()
+      
+      // Notify that storage size has changed
+      NotificationCenter.default.post(name: Storage.storageSizeDidChangeNotification, object: nil)
+      
       // Update items list
       items = Array(loadedItems.values).sorted { decorator1, decorator2 in
         sorter.compare(decorator1.item, decorator2.item)
@@ -571,6 +588,15 @@ class History { // swiftlint:disable:this type_body_length
       try? Storage.shared.context.delete(model: HistoryItem.self)
       Storage.shared.context.processPendingChanges()
       try? Storage.shared.context.save()
+      
+      // Clear entire cache directory since all items are deleted
+      Storage.shared.clearCacheDirectory()
+      
+      // Vacuum database to reclaim space
+      Storage.shared.vacuumDatabase()
+      
+      // Notify that storage size has changed
+      NotificationCenter.default.post(name: Storage.storageSizeDidChangeNotification, object: nil)
     }
 
     Clipboard.shared.clear()
@@ -598,6 +624,10 @@ class History { // swiftlint:disable:this type_body_length
     totalCount = max(0, totalCount - 1)
 
     updateUnpinnedShortcuts()
+    
+    // Notify that storage size may have changed
+    NotificationCenter.default.post(name: Storage.storageSizeDidChangeNotification, object: nil)
+    
     Task {
       AppState.shared.popup.needsResize = true
     }
@@ -607,10 +637,46 @@ class History { // swiftlint:disable:this type_body_length
   private func cleanup(_ item: HistoryItemDecorator) {
     item.cleanupImages()
     // cleanupImages() already calls untrackThumbnail, so no need to call it again
-    // Clean up external files
+    // Clean up external cache files only (not original file paths)
     item.item.contents.forEach { content in
       if let filePath = content.filePath {
-        Storage.shared.deleteCacheFile(at: filePath)
+        let url = URL(fileURLWithPath: filePath)
+        // Only delete files in the cache directory (backed up files)
+        // Don't delete original file paths (they're not backed up)
+        if url.path.hasPrefix(Storage.shared.cacheDirectory.path) {
+          Storage.shared.deleteCacheFile(at: filePath)
+        }
+      }
+    }
+  }
+  
+  // Clean up orphaned cache files (files in cache directory not referenced by any items)
+  @MainActor
+  private func cleanupOrphanedCacheFiles() {
+    // Get all file paths referenced by remaining items
+    var referencedPaths = Set<String>()
+    let descriptor = FetchDescriptor<HistoryItem>()
+    if let allItems = try? Storage.shared.context.fetch(descriptor) {
+      for item in allItems {
+        for content in item.contents {
+          if let filePath = content.filePath {
+            let url = URL(fileURLWithPath: filePath)
+            // Only track cache directory files
+            if url.path.hasPrefix(Storage.shared.cacheDirectory.path) {
+              referencedPaths.insert(filePath)
+            }
+          }
+        }
+      }
+    }
+    
+    // Delete cache files that are not referenced
+    let cacheDir = Storage.shared.cacheDirectory
+    if let files = try? FileManager.default.contentsOfDirectory(at: cacheDir, includingPropertiesForKeys: nil) {
+      for file in files {
+        if !referencedPaths.contains(file.path) {
+          try? FileManager.default.removeItem(at: file)
+        }
       }
     }
   }
@@ -682,7 +748,39 @@ class History { // swiftlint:disable:this type_body_length
       return modified
     }
     
-    // Get pure text from the new item
+    // For images/videos, check by file path first, then by MD5
+    if item.hasImageVideoFilePath {
+      var descriptor = FetchDescriptor<HistoryItem>(
+        sortBy: [SortDescriptor(\.lastCopiedAt, order: .reverse)]
+      )
+      descriptor.fetchLimit = 1000
+      
+      if let recent = try? Storage.shared.context.fetch(descriptor) {
+        // Step 1: Check for duplicate by file path (for files with paths)
+        if let filePath = item.imageVideoFilePath {
+          if let duplicate = recent.first(where: { existingItem in
+            existingItem != item && existingItem.imageVideoFilePath == filePath
+          }) {
+            return duplicate
+          }
+        }
+        
+        // Step 2: If no path match, check by MD5 hash
+        // Calculate MD5 for current item (from file path or image data)
+        let itemMD5 = calculateImageMD5(item: item)
+        if let itemMD5 = itemMD5 {
+          if let duplicate = recent.first(where: { existingItem in
+            guard existingItem != item else { return false }
+            let existingMD5 = calculateImageMD5(item: existingItem)
+            return existingMD5 == itemMD5
+          }) {
+            return duplicate
+          }
+        }
+      }
+    }
+    
+    // For text items, check by text content
     let itemText = item.text ?? item.previewableText
     guard !itemText.isEmpty else {
       return nil
@@ -700,6 +798,27 @@ class History { // swiftlint:disable:this type_body_length
       }
     }
 
+    return nil
+  }
+  
+  // Calculate MD5 hash of an image (from file path or image data)
+  private func calculateImageMD5(item: HistoryItem) -> String? {
+    // First try to get data from file path
+    if let filePath = item.imageVideoFilePath {
+      // Try to read from file if accessible
+      if FileManager.default.isReadableFile(atPath: filePath),
+         let fileData = try? Data(contentsOf: URL(fileURLWithPath: filePath)) {
+        let digest = Insecure.MD5.hash(data: fileData)
+        return digest.map { String(format: "%02x", $0) }.joined()
+      }
+    }
+    
+    // Fallback to image data stored in database
+    if let imageData = item.imageData {
+      let digest = Insecure.MD5.hash(data: imageData)
+      return digest.map { String(format: "%02x", $0) }.joined()
+    }
+    
     return nil
   }
 

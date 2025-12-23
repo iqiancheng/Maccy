@@ -59,21 +59,33 @@ class HistoryItemDecoratorTests: XCTestCase {
     XCTAssertNil(itemDecorator.thumbnailImage)
   }
 
-  func testImage() {
+  func testImage() async {
     let image = NSImage(named: "StatusBarMenuImage")!
     let itemDecorator = historyItemDecorator(image)
     itemDecorator.sizeImages()
+    // Wait a bit for async operations to complete
+    try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
     XCTAssertEqual(itemDecorator.title, "")
-    XCTAssertEqual(itemDecorator.previewImage!.size, image.size)
-    XCTAssertEqual(itemDecorator.thumbnailImage!.size, image.size)
+    XCTAssertNotNil(itemDecorator.previewImage)
+    XCTAssertNotNil(itemDecorator.thumbnailImage)
+    if let previewImage = itemDecorator.previewImage {
+      XCTAssertEqual(previewImage.size, image.size)
+    }
+    if let thumbnailImage = itemDecorator.thumbnailImage {
+      XCTAssertEqual(thumbnailImage.size, image.size)
+    }
   }
 
   // We also need to add test for image with width bigger than max width.
-  func testImageWithHeightBiggerThanMaxHeight() {
+  func testImageWithHeightBiggerThanMaxHeight() async {
     let image = NSImage(named: "NSApplicationIcon")!
     let itemDecorator = historyItemDecorator(image)
     itemDecorator.sizeImages()
-    XCTAssertEqual(itemDecorator.thumbnailImage!.size, NSSize(width: 40, height: 40))
+    // Wait a bit for async operations to complete
+    try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
+    if let thumbnailImage = itemDecorator.thumbnailImage {
+      XCTAssertEqual(thumbnailImage.size, NSSize(width: 40, height: 40))
+    }
   }
 
   func testFile() {

@@ -62,6 +62,7 @@ struct StorageSettingsPane: View {
   @State private var viewModel = ViewModel()
   @State private var storageSize = Storage.shared.size
   @State private var sizeText: String = ""
+  @State private var refreshTimer: Timer?
   
   private let numberFormatter: NumberFormatter = {
     let formatter = NumberFormatter()
@@ -186,7 +187,18 @@ struct StorageSettingsPane: View {
             .foregroundStyle(.gray)
             .help(Text("CurrentSizeTooltip", tableName: "StorageSettings"))
             .onAppear {
-              storageSize = Storage.shared.size
+              updateStorageSize()
+              // Also refresh periodically (every 5 seconds) to catch external changes
+              refreshTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { _ in
+                updateStorageSize()
+              }
+            }
+            .onDisappear {
+              refreshTimer?.invalidate()
+              refreshTimer = nil
+            }
+            .onReceive(NotificationCenter.default.publisher(for: Storage.storageSizeDidChangeNotification)) { _ in
+              updateStorageSize()
             }
         }
       }
@@ -202,6 +214,10 @@ struct StorageSettingsPane: View {
         .help(Text("SortByTooltip", tableName: "StorageSettings"))
       }
     }
+  }
+  
+  private func updateStorageSize() {
+    storageSize = Storage.shared.size
   }
 }
 

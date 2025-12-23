@@ -82,6 +82,22 @@ class HistoryItem {
   }
 
   func generateTitle() -> String {
+    // For image/video files, use filename as title
+    if hasImageVideoFilePath, let filePath = imageVideoFilePath {
+      let url = URL(fileURLWithPath: filePath)
+      let fileName = url.lastPathComponent
+      if !fileName.isEmpty {
+        // If image can be loaded, perform text recognition asynchronously
+        if image != nil {
+          Task {
+            self.performTextRecognition()
+          }
+        }
+        return fileName
+      }
+    }
+    
+    // For images that can be loaded, perform text recognition
     guard image == nil else {
       Task {
         self.performTextRecognition()
@@ -111,8 +127,10 @@ class HistoryItem {
 
   var previewableText: String {
     if !fileURLs.isEmpty {
+      // For files, only show the filename (not the full path) for display
+      // But the full path is still stored in filePath for preview generation
       fileURLs
-        .compactMap { $0.absoluteString.removingPercentEncoding }
+        .map { $0.lastPathComponent }
         .joined(separator: "\n")
     } else if let text = text, !text.isEmpty {
       text
@@ -130,8 +148,31 @@ class HistoryItem {
       return []
     }
 
-    return allContentData([.fileURL])
+    var urlPaths: Set<String> = []
+    var urls: [URL] = []
+    
+    // First, try to get URLs from filePath (for image/video files that only store path)
+    for content in contents where NSPasteboard.PasteboardType(content.type) == .fileURL {
+      if let filePath = content.filePath, !urlPaths.contains(filePath) {
+        urlPaths.insert(filePath)
+        urls.append(URL(fileURLWithPath: filePath))
+      }
+    }
+    
+    // Also get URLs from value data (for regular file URLs)
+    let dataUrls = allContentData([.fileURL])
       .compactMap { URL(dataRepresentation: $0, relativeTo: nil, isAbsolute: true) }
+    
+    // Add URLs from data that aren't already in the set
+    for url in dataUrls {
+      let path = url.path
+      if !urlPaths.contains(path) {
+        urlPaths.insert(path)
+        urls.append(url)
+      }
+    }
+    
+    return urls
   }
 
   var htmlData: Data? { contentData([.html]) }
@@ -143,12 +184,82 @@ class HistoryItem {
     return NSAttributedString(html: data, documentAttributes: nil)
   }
 
+  // Check if content has image/video file path
+  var hasImageVideoFilePath: Bool {
+    // Check fileURL type content with filePath (for copied files)
+    if contents.contains(where: { content in
+      NSPasteboard.PasteboardType(content.type) == .fileURL && content.filePath != nil
+    }) {
+      if let filePath = imageVideoFilePath {
+        return true
+      }
+    }
+    
+    // Also check image content types with filePath (for cached clipboard images)
+    return contents.contains { content in
+      let type = NSPasteboard.PasteboardType(content.type)
+      return [.png, .tiff, .jpeg, .heic].contains(type) && content.filePath != nil
+    }
+  }
+  
+  // Get image/video file path if available
+  var imageVideoFilePath: String? {
+    // First, check fileURL type content with filePath (for copied files)
+    if let fileURLContent = contents.first(where: { content in
+      NSPasteboard.PasteboardType(content.type) == .fileURL && content.filePath != nil
+    }), let filePath = fileURLContent.filePath {
+      let url = URL(fileURLWithPath: filePath)
+      let ext = url.pathExtension.lowercased()
+      let imageVideoExtensions: Set<String> = ["png", "jpg", "jpeg", "tiff", "tif", "heic", "heif", "gif", "bmp", "webp", "mov", "mp4", "avi", "mkv", "m4v", "mpg", "mpeg"]
+      if imageVideoExtensions.contains(ext) {
+        return filePath
+      }
+    }
+    
+    // Also check image content types with filePath (for cached clipboard images)
+    return contents.first(where: { content in
+      let type = NSPasteboard.PasteboardType(content.type)
+      if [.png, .tiff, .jpeg, .heic].contains(type), let filePath = content.filePath {
+        return true
+      }
+      return false
+    })?.filePath
+  }
+  
+  // Check if content is a video file
+  var isVideoFile: Bool {
+    guard let filePath = imageVideoFilePath else { return false }
+    let url = URL(fileURLWithPath: filePath)
+    let ext = url.pathExtension.lowercased()
+    let videoExtensions: Set<String> = ["mov", "mp4", "avi", "mkv", "m4v", "mpg", "mpeg"]
+    return videoExtensions.contains(ext)
+  }
+
   var imageData: Data? {
+    // Skip video files - they need special handling
+    if isVideoFile {
+      return nil
+    }
+    
     // First try to load from external file path
+    if let filePath = imageVideoFilePath {
+      // Check if file is readable before attempting to load
+      guard FileManager.default.isReadableFile(atPath: filePath) else {
+        return nil
+      }
+      let url = URL(fileURLWithPath: filePath)
+      return try? Data(contentsOf: url)
+    }
+    
+    // Also check image content types with file paths
     if let imageContent = contents.first(where: { content in
       let type = NSPasteboard.PasteboardType(content.type)
       return [.tiff, .png, .jpeg, .heic].contains(type) && content.filePath != nil
     }), let filePath = imageContent.filePath {
+      // Check if file is readable before attempting to load
+      guard FileManager.default.isReadableFile(atPath: filePath) else {
+        return nil
+      }
       let url = URL(fileURLWithPath: filePath)
       return try? Data(contentsOf: url)
     }
@@ -157,7 +268,10 @@ class HistoryItem {
     var data: Data?
     data = contentData([.tiff, .png, .jpeg, .heic])
     if data == nil, universalClipboardImage, let url = fileURLs.first {
-      data = try? Data(contentsOf: url)
+      // Check if file is readable before attempting to load
+      if FileManager.default.isReadableFile(atPath: url.path) {
+        data = try? Data(contentsOf: url)
+      }
     }
 
     return data
